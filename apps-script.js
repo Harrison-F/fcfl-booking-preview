@@ -14,7 +14,7 @@
 // CONFIG — Update these values
 // ============================================
 const CONFIG = {
-  STRIPE_SECRET_KEY: 'YOUR_STRIPE_SECRET_KEY',
+  STRIPE_SECRET_KEY: PropertiesService.getScriptProperties().getProperty('STRIPE_SECRET_KEY'),
   SHEET_NAME: 'Event Bookings',
   FCFL_EMAIL: 'info@fatcatfablab.org',
   DEPOSIT_AMOUNT_CENTS: 5000,  // $50.00
@@ -480,6 +480,18 @@ function captureDeposit(rowNumber) {
   sheet.getRange(rowNumber, COL.PAYMENT_STATUS).setValue('Deposit Retained');
   sheet.getRange(rowNumber, COL.STATUS).setValue('Completed');
   Logger.log('Deposit marked as retained for row ' + rowNumber);
+}
+
+// Set Stripe key — run this ONCE from the script editor
+// Before running: replace the placeholder below with your actual key
+function setStripeKey() {
+  const key = 'PASTE_YOUR_STRIPE_KEY_HERE';
+  if (key === 'PASTE_YOUR_STRIPE_KEY_HERE') {
+    Logger.log('❌ Edit this function first — replace the placeholder with your Stripe secret key');
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty('STRIPE_SECRET_KEY', key);
+  Logger.log('✅ Stripe key saved to Script Properties');
 }
 
 // Test Stripe connection
