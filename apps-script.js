@@ -1,19 +1,27 @@
 // ============================================
-// FCFL Event Booking — Google Apps Script
+// FCFL Event Booking — Google Apps Script v2
 // ============================================
 // Paste this entire file into your Apps Script editor
 // (Extensions → Apps Script from your Google Sheet)
+//
+// SETUP:
+//   1. Paste this code
+//   2. Update CONFIG below with your Stripe key
+//   3. Run setupTriggers() once (from the function dropdown → Run)
+//   4. Deploy as web app (Deploy → New deployment → Web app → Anyone can access)
 
 // ============================================
 // CONFIG — Update these values
 // ============================================
 const CONFIG = {
-  STRIPE_SECRET_KEY: 'YOUR_STRIPE_SECRET_KEY', // Switch to live key for production
+  STRIPE_SECRET_KEY: 'YOUR_STRIPE_SECRET_KEY',
   SHEET_NAME: 'Event Bookings',
   FCFL_EMAIL: 'info@fatcatfablab.org',
-  DEPOSIT_AMOUNT: 5000, // $50.00 in cents
-  HOURLY_RATE: 2000,    // $20.00 in cents
-  AUTO_RELEASE_HOURS: 72
+  DEPOSIT_AMOUNT_CENTS: 5000,  // $50.00
+  HOURLY_RATE_CENTS: 2000,     // $20.00
+  AUTO_REFUND_HOURS: 72,
+  SUCCESS_URL: 'https://fatcatfablab.org/booking-confirmed',
+  CANCEL_URL: 'https://fatcatfablab.org/booking-cancelled'
 };
 
 // ============================================
@@ -33,10 +41,10 @@ const COL = {
   IS_FREE: 11,
   HOSTING_FEE: 12,
   DEPOSIT: 13,
-  STATUS: 14,         // Pending → Approved → Completed
-  PAYMENT_STATUS: 15, // → Deposit Link Sent → Deposit Held → Deposit Released / Deposit Captured
-  DEPOSIT_PI_ID: 16,  // Stripe PaymentIntent ID for deposit
-  FEE_PI_ID: 17,      // Stripe PaymentIntent ID for hosting fee
+  STATUS: 14,
+  PAYMENT_STATUS: 15,
+  CHECKOUT_SESSION_ID: 16,
+  PAYMENT_INTENT_ID: 17,
   NOTES: 18
 };
 
@@ -49,27 +57,27 @@ function doPost(e) {
     const params = e.parameter;
 
     sheet.appendRow([
-      new Date(),                                    // Timestamp
-      params.name,                                   // Name
-      params.email,                                  // Email
-      params.eventName,                              // Event Name
-      params.description,                            // Description
-      params.space,                                  // Space
-      params.date,                                   // Date
-      params.startTimeFormatted,                     // Start Time
-      params.endTimeFormatted,                       // End Time
-      parseFloat(params.duration),                   // Duration (hrs)
-      params.isFree === 'yes' ? 'Yes' : 'No',       // Free Event?
-      parseFloat(params.hostingFee).toFixed(2),      // Hosting Fee
-      '50.00',                                       // Deposit
-      'Pending',                                     // Status
-      '',                                            // Payment Status
-      '',                                            // Deposit PaymentIntent ID
-      '',                                            // Fee PaymentIntent ID
-      params.notes || ''                             // Notes
+      new Date(),
+      params.name,
+      params.email,
+      params.eventName,
+      params.description,
+      params.space,
+      params.date,
+      params.startTimeFormatted,
+      params.endTimeFormatted,
+      parseFloat(params.duration),
+      params.isFree === 'yes' ? 'Yes' : 'No',
+      parseFloat(params.hostingFee).toFixed(2),
+      '50.00',
+      'Pending',
+      '',    // Payment Status
+      '',    // Checkout Session ID
+      '',    // Payment Intent ID
+      params.notes || ''
     ]);
 
-    // Send confirmation email to the requester
+    // Confirmation email to requester
     MailApp.sendEmail({
       to: params.email,
       subject: `FCFL Booking Request Received: ${params.eventName}`,
@@ -103,7 +111,7 @@ function doPost(e) {
         </ul>
         <p><strong>Description:</strong> ${params.description}</p>
         ${params.notes ? '<p><strong>Notes:</strong> ' + params.notes + '</p>' : ''}
-        <p>To approve, change the Status column to "Approved" in the Event Bookings sheet.</p>
+        <p>To approve, change the Status column to <strong>"Approved"</strong> in the Event Bookings sheet.</p>
       `
     });
 
@@ -112,6 +120,7 @@ function doPost(e) {
     ).setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
+    Logger.log('doPost error: ' + error.toString());
     return ContentService.createTextOutput(
       JSON.stringify({ status: 'error', message: error.toString() })
     ).setMimeType(ContentService.MimeType.JSON);
@@ -119,9 +128,10 @@ function doPost(e) {
 }
 
 // ============================================
-// APPROVAL TRIGGER — Fires when Status changes to "Approved"
+// APPROVAL HANDLER — Fires when Status changes to "Approved"
+// Must be an INSTALLABLE trigger (setupTriggers creates it)
 // ============================================
-function onEdit(e) {
+function onStatusChange(e) {
   const sheet = e.source.getActiveSheet();
   if (sheet.getName() !== CONFIG.SHEET_NAME) return;
 
@@ -131,74 +141,50 @@ function onEdit(e) {
 
   // Only trigger on Status column changes
   if (col !== COL.STATUS) return;
-  if (e.value !== 'Approved') return;
+  if (row <= 1) return; // Skip header
+
+  const newValue = range.getValue();
+  if (newValue !== 'Approved') return;
 
   // Get row data
   const rowData = sheet.getRange(row, 1, 1, 18).getValues()[0];
   const email = rowData[COL.EMAIL - 1];
   const name = rowData[COL.NAME - 1];
   const eventName = rowData[COL.EVENT_NAME - 1];
+  const space = rowData[COL.SPACE - 1];
   const date = rowData[COL.DATE - 1];
   const startTime = rowData[COL.START_TIME - 1];
   const endTime = rowData[COL.END_TIME - 1];
   const duration = rowData[COL.DURATION - 1];
   const isFree = rowData[COL.IS_FREE - 1] === 'Yes';
-  const hostingFee = parseFloat(rowData[COL.HOSTING_FEE - 1]);
+  const hostingFee = parseFloat(rowData[COL.HOSTING_FEE - 1]) || 0;
 
   try {
-    // 1. Create deposit auth hold (manual capture)
-    const depositPI = stripeCreatePaymentIntent(
-      CONFIG.DEPOSIT_AMOUNT,
-      `FCFL Deposit: ${eventName} (${date})`,
-      email,
-      'manual' // capture_method
-    );
-
-    sheet.getRange(row, COL.DEPOSIT_PI_ID).setValue(depositPI.id);
-
-    // 2. If paid event, create hosting fee charge
-    let feePI = null;
-    if (!isFree && hostingFee > 0) {
-      feePI = stripeCreatePaymentIntent(
-        Math.round(hostingFee * 100),
-        `FCFL Hosting Fee: ${eventName} (${date})`,
-        email,
-        'automatic' // immediate capture
-      );
-      sheet.getRange(row, COL.FEE_PI_ID).setValue(feePI.id);
-    }
-
-    // 3. Create Stripe Checkout session for combined payment
+    // Build Checkout Session line items
     const lineItems = [];
 
-    // Deposit line item
+    // Security deposit (always)
     lineItems.push({
-      price_data: {
-        currency: 'usd',
-        product_data: { name: 'Security Deposit (refundable)' },
-        unit_amount: CONFIG.DEPOSIT_AMOUNT
-      },
-      quantity: 1
+      name: 'Security Deposit (refundable)',
+      amount: CONFIG.DEPOSIT_AMOUNT_CENTS,
     });
 
-    // Hosting fee line item (if applicable)
+    // Hosting fee (paid events only)
     if (!isFree && hostingFee > 0) {
       lineItems.push({
-        price_data: {
-          currency: 'usd',
-          product_data: { name: `Hosting Fee (${duration}hr × $20)` },
-          unit_amount: Math.round(hostingFee * 100)
-        },
-        quantity: 1
+        name: `Hosting Fee (${duration}hr × $20)`,
+        amount: Math.round(hostingFee * 100),
       });
     }
 
-    const checkoutUrl = stripeCreateCheckoutSession(lineItems, email, depositPI.id);
+    // Create Stripe Checkout Session
+    const session = stripeCreateCheckoutSession(lineItems, email, row);
 
-    // Update payment status
+    // Save session ID
+    sheet.getRange(row, COL.CHECKOUT_SESSION_ID).setValue(session.id);
     sheet.getRange(row, COL.PAYMENT_STATUS).setValue('Payment Link Sent');
 
-    // 4. Send approval + payment email
+    // Send approval + payment email
     const totalDue = 50 + (isFree ? 0 : hostingFee);
 
     MailApp.sendEmail({
@@ -207,7 +193,7 @@ function onEdit(e) {
       htmlBody: `
         <h2>Your Booking Has Been Approved! 🎉</h2>
         <p>Hi ${name},</p>
-        <p>Great news — your booking request for the <strong>${rowData[COL.SPACE - 1]}</strong> has been approved:</p>
+        <p>Great news — your request to use the <strong>${space}</strong> has been approved:</p>
         <ul>
           <li><strong>Event:</strong> ${eventName}</li>
           <li><strong>Date:</strong> ${date}</li>
@@ -215,12 +201,21 @@ function onEdit(e) {
         </ul>
         <h3>Payment Required</h3>
         <table style="border-collapse:collapse;">
-          <tr><td style="padding:4px 12px 4px 0;">Security Deposit (refundable)</td><td><strong>$50.00</strong></td></tr>
-          ${!isFree ? '<tr><td style="padding:4px 12px 4px 0;">Hosting Fee (' + duration + 'hr × $20)</td><td><strong>$' + hostingFee.toFixed(2) + '</strong></td></tr>' : ''}
-          <tr style="border-top:1px solid #ccc;"><td style="padding:8px 12px 4px 0;"><strong>Total</strong></td><td><strong>$${totalDue.toFixed(2)}</strong></td></tr>
+          <tr>
+            <td style="padding:4px 12px 4px 0;">Security Deposit (refundable)</td>
+            <td><strong>$50.00</strong></td>
+          </tr>
+          ${!isFree ? `<tr>
+            <td style="padding:4px 12px 4px 0;">Hosting Fee (${duration}hr × $20)</td>
+            <td><strong>$${hostingFee.toFixed(2)}</strong></td>
+          </tr>` : ''}
+          <tr style="border-top:1px solid #ccc;">
+            <td style="padding:8px 12px 4px 0;"><strong>Total</strong></td>
+            <td><strong>$${totalDue.toFixed(2)}</strong></td>
+          </tr>
         </table>
         <p style="margin-top:16px;">
-          <a href="${checkoutUrl}" style="background:#32D011;color:#000;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">Complete Payment →</a>
+          <a href="${session.url}" style="background:#5bbfbf;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">Complete Payment →</a>
         </p>
         <p style="margin-top:16px;font-size:0.9em;color:#666;">
           The $50 security deposit will be automatically refunded 72 hours after your event, provided the space is left clean and all rules are followed.
@@ -229,40 +224,81 @@ function onEdit(e) {
       `
     });
 
+    Logger.log('Approval email sent for row ' + row + ': ' + eventName);
+
   } catch (error) {
     sheet.getRange(row, COL.PAYMENT_STATUS).setValue('Error: ' + error.toString());
-    Logger.log('Approval error: ' + error.toString());
+    Logger.log('Approval error for row ' + row + ': ' + error.toString());
   }
 }
 
 // ============================================
-// DAILY TRIGGER — Auto-release deposits after 72 hours
+// PAYMENT STATUS CHECKER
+// Run periodically to update payment status from Stripe
 // ============================================
-function autoReleaseDeposits() {
+function checkPaymentStatus() {
+  const sheet = getOrCreateSheet();
+  const data = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const paymentStatus = row[COL.PAYMENT_STATUS - 1];
+    const sessionId = row[COL.CHECKOUT_SESSION_ID - 1];
+    const rowNum = i + 1;
+
+    // Only check rows waiting for payment
+    if (paymentStatus !== 'Payment Link Sent' || !sessionId) continue;
+
+    try {
+      const session = stripeGetCheckoutSession(sessionId);
+
+      if (session.payment_status === 'paid') {
+        // Payment completed — save the PaymentIntent ID for refund later
+        sheet.getRange(rowNum, COL.PAYMENT_INTENT_ID).setValue(session.payment_intent);
+        sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Paid');
+        Logger.log('Payment confirmed for row ' + rowNum);
+      } else if (session.status === 'expired') {
+        sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Link Expired');
+        Logger.log('Checkout expired for row ' + rowNum);
+      }
+    } catch (error) {
+      Logger.log('Error checking payment for row ' + rowNum + ': ' + error.toString());
+    }
+  }
+}
+
+// ============================================
+// AUTO-REFUND DEPOSITS — Runs every 6 hours
+// Refunds $50 deposit 72 hours after the event date
+// ============================================
+function autoRefundDeposits() {
   const sheet = getOrCreateSheet();
   const data = sheet.getDataRange().getValues();
   const now = new Date();
 
-  for (let i = 1; i < data.length; i++) { // Skip header row
+  for (let i = 1; i < data.length; i++) {
     const row = data[i];
     const status = row[COL.STATUS - 1];
     const paymentStatus = row[COL.PAYMENT_STATUS - 1];
-    const eventDate = row[COL.DATE - 1];
-    const depositPIId = row[COL.DEPOSIT_PI_ID - 1];
+    const eventDateRaw = row[COL.DATE - 1];
+    const paymentIntentId = row[COL.PAYMENT_INTENT_ID - 1];
+    const rowNum = i + 1;
 
-    if (status !== 'Approved' || paymentStatus !== 'Deposit Held' || !depositPIId) continue;
+    // Only process paid, approved bookings
+    if (status !== 'Approved' || paymentStatus !== 'Paid' || !paymentIntentId) continue;
 
     // Parse event date and add 72 hours
-    const eventDateObj = new Date(eventDate);
-    const releaseTime = new Date(eventDateObj.getTime() + CONFIG.AUTO_RELEASE_HOURS * 60 * 60 * 1000);
+    const eventDate = new Date(eventDateRaw);
+    if (isNaN(eventDate.getTime())) continue;
 
-    if (now >= releaseTime) {
+    const refundAfter = new Date(eventDate.getTime() + CONFIG.AUTO_REFUND_HOURS * 60 * 60 * 1000);
+
+    if (now >= refundAfter) {
       try {
-        // Cancel (release) the auth hold
-        stripeCancelPaymentIntent(depositPIId);
+        // Refund the deposit portion ($50)
+        stripeCreateRefund(paymentIntentId, CONFIG.DEPOSIT_AMOUNT_CENTS);
 
-        const rowNum = i + 1;
-        sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Deposit Released');
+        sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Deposit Refunded');
         sheet.getRange(rowNum, COL.STATUS).setValue('Completed');
 
         // Notify the member
@@ -272,19 +308,19 @@ function autoReleaseDeposits() {
 
         MailApp.sendEmail({
           to: email,
-          subject: `FCFL Deposit Released: ${eventName}`,
+          subject: `FCFL Deposit Refunded: ${eventName}`,
           htmlBody: `
-            <h2>Your Deposit Has Been Released ✅</h2>
+            <h2>Your Deposit Has Been Refunded ✅</h2>
             <p>Hi ${name},</p>
-            <p>Your $50 security deposit for <strong>${eventName}</strong> has been released. You should see it back on your statement within 5-10 business days.</p>
+            <p>Your $50 security deposit for <strong>${eventName}</strong> has been refunded. You should see it back on your statement within 5-10 business days.</p>
             <p>Thanks for hosting at Fat Cat Fab Lab!</p>
             <p>— Fat Cat Fab Lab</p>
           `
         });
 
-        Logger.log('Released deposit for row ' + rowNum + ': ' + eventName);
+        Logger.log('Deposit refunded for row ' + rowNum + ': ' + eventName);
       } catch (error) {
-        Logger.log('Error releasing deposit for row ' + (i + 1) + ': ' + error.toString());
+        Logger.log('Error refunding deposit for row ' + rowNum + ': ' + error.toString());
       }
     }
   }
@@ -293,46 +329,22 @@ function autoReleaseDeposits() {
 // ============================================
 // STRIPE API HELPERS
 // ============================================
-function stripeCreatePaymentIntent(amount, description, email, captureMethod) {
-  const payload = {
-    amount: amount,
-    currency: 'usd',
-    description: description,
-    receipt_email: email,
-    capture_method: captureMethod,
-    'payment_method_types[]': 'card'
-  };
 
-  const response = UrlFetchApp.fetch('https://api.stripe.com/v1/payment_intents', {
-    method: 'post',
-    headers: {
-      'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
-    },
-    payload: payload,
-    muteHttpExceptions: true
-  });
-
-  const result = JSON.parse(response.getContentText());
-  if (result.error) throw new Error(result.error.message);
-  return result;
-}
-
-function stripeCreateCheckoutSession(lineItems, email, depositPIId) {
-  // Build form-encoded payload for Checkout Session
+function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
   const payload = {
     'mode': 'payment',
-    'customer_email': email,
-    'success_url': 'https://fatcatfablab.org/booking-confirmed',
-    'cancel_url': 'https://fatcatfablab.org/booking-cancelled',
-    'metadata[deposit_pi_id]': depositPIId
+    'customer_email': customerEmail,
+    'success_url': CONFIG.SUCCESS_URL + '?session_id={CHECKOUT_SESSION_ID}',
+    'cancel_url': CONFIG.CANCEL_URL,
+    'metadata[sheet_row]': sheetRow.toString(),
+    'expires_after': 72 * 60 * 60, // 72 hours in seconds
   };
 
-  // Add line items
   lineItems.forEach((item, idx) => {
-    payload[`line_items[${idx}][price_data][currency]`] = item.price_data.currency;
-    payload[`line_items[${idx}][price_data][product_data][name]`] = item.price_data.product_data.name;
-    payload[`line_items[${idx}][price_data][unit_amount]`] = item.price_data.unit_amount;
-    payload[`line_items[${idx}][quantity]`] = item.quantity;
+    payload[`line_items[${idx}][price_data][currency]`] = 'usd';
+    payload[`line_items[${idx}][price_data][product_data][name]`] = item.name;
+    payload[`line_items[${idx}][price_data][unit_amount]`] = item.amount;
+    payload[`line_items[${idx}][quantity]`] = 1;
   });
 
   const response = UrlFetchApp.fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -345,32 +357,18 @@ function stripeCreateCheckoutSession(lineItems, email, depositPIId) {
   });
 
   const result = JSON.parse(response.getContentText());
-  if (result.error) throw new Error(result.error.message);
-  return result.url;
-}
-
-function stripeCancelPaymentIntent(paymentIntentId) {
-  const response = UrlFetchApp.fetch(
-    `https://api.stripe.com/v1/payment_intents/${paymentIntentId}/cancel`,
-    {
-      method: 'post',
-      headers: {
-        'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
-      },
-      muteHttpExceptions: true
-    }
-  );
-
-  const result = JSON.parse(response.getContentText());
-  if (result.error) throw new Error(result.error.message);
+  if (result.error) {
+    Logger.log('Stripe error: ' + JSON.stringify(result.error));
+    throw new Error('Stripe: ' + result.error.message);
+  }
   return result;
 }
 
-function stripeCapturePaymentIntent(paymentIntentId) {
+function stripeGetCheckoutSession(sessionId) {
   const response = UrlFetchApp.fetch(
-    `https://api.stripe.com/v1/payment_intents/${paymentIntentId}/capture`,
+    `https://api.stripe.com/v1/checkout/sessions/${sessionId}`,
     {
-      method: 'post',
+      method: 'get',
       headers: {
         'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
       },
@@ -379,7 +377,27 @@ function stripeCapturePaymentIntent(paymentIntentId) {
   );
 
   const result = JSON.parse(response.getContentText());
-  if (result.error) throw new Error(result.error.message);
+  if (result.error) throw new Error('Stripe: ' + result.error.message);
+  return result;
+}
+
+function stripeCreateRefund(paymentIntentId, amountCents) {
+  const payload = {
+    'payment_intent': paymentIntentId,
+    'amount': amountCents,
+  };
+
+  const response = UrlFetchApp.fetch('https://api.stripe.com/v1/refunds', {
+    method: 'post',
+    headers: {
+      'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+    },
+    payload: payload,
+    muteHttpExceptions: true
+  });
+
+  const result = JSON.parse(response.getContentText());
+  if (result.error) throw new Error('Stripe: ' + result.error.message);
   return result;
 }
 
@@ -396,13 +414,11 @@ function getOrCreateSheet() {
       'Timestamp', 'Name', 'Email', 'Event Name', 'Description',
       'Space', 'Date', 'Start Time', 'End Time', 'Duration (hrs)',
       'Free Event?', 'Hosting Fee', 'Deposit', 'Status',
-      'Payment Status', 'Deposit PI ID', 'Fee PI ID', 'Notes'
+      'Payment Status', 'Checkout Session ID', 'Payment Intent ID', 'Notes'
     ]);
-    // Bold header row
     sheet.getRange(1, 1, 1, 18).setFontWeight('bold');
-    // Freeze header
     sheet.setFrozenRows(1);
-    // Set Status column dropdown validation
+
     const statusRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(['Pending', 'Approved', 'Completed', 'Denied', 'Cancelled'])
       .build();
@@ -413,21 +429,76 @@ function getOrCreateSheet() {
 }
 
 // ============================================
-// SETUP FUNCTION — Run once to create triggers
+// SETUP — Run this ONCE to create all triggers
 // ============================================
 function setupTriggers() {
-  // Remove existing triggers to avoid duplicates
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Remove all existing project triggers to avoid duplicates
   ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'autoReleaseDeposits') {
-      ScriptApp.deleteTrigger(trigger);
-    }
+    ScriptApp.deleteTrigger(trigger);
   });
 
-  // Create daily trigger for auto-release
-  ScriptApp.newTrigger('autoReleaseDeposits')
-    .timeBased()
-    .everyHours(6) // Check every 6 hours for more timely releases
+  // 1. Installable onEdit trigger — fires on ANY edit with full permissions
+  //    (unlike the simple onEdit which can't send emails or call APIs)
+  ScriptApp.newTrigger('onStatusChange')
+    .forSpreadsheet(ss)
+    .onEdit()
     .create();
 
-  Logger.log('Triggers set up successfully.');
+  // 2. Auto-refund deposits — check every 6 hours
+  ScriptApp.newTrigger('autoRefundDeposits')
+    .timeBased()
+    .everyHours(6)
+    .create();
+
+  // 3. Payment status checker — check every 2 hours
+  ScriptApp.newTrigger('checkPaymentStatus')
+    .timeBased()
+    .everyHours(2)
+    .create();
+
+  Logger.log('✅ All triggers created:');
+  Logger.log('  - onStatusChange (installable onEdit)');
+  Logger.log('  - autoRefundDeposits (every 6 hours)');
+  Logger.log('  - checkPaymentStatus (every 2 hours)');
+}
+
+// ============================================
+// MANUAL HELPERS — Run from script editor as needed
+// ============================================
+
+// Manually capture a deposit (if rules were broken)
+function captureDeposit(rowNumber) {
+  const sheet = getOrCreateSheet();
+  const piId = sheet.getRange(rowNumber, COL.PAYMENT_INTENT_ID).getValue();
+  if (!piId) {
+    Logger.log('No Payment Intent ID for row ' + rowNumber);
+    return;
+  }
+  // For charge+refund model, "capturing" means just NOT refunding
+  sheet.getRange(rowNumber, COL.PAYMENT_STATUS).setValue('Deposit Retained');
+  sheet.getRange(rowNumber, COL.STATUS).setValue('Completed');
+  Logger.log('Deposit marked as retained for row ' + rowNumber);
+}
+
+// Test Stripe connection
+function testStripeConnection() {
+  try {
+    const response = UrlFetchApp.fetch('https://api.stripe.com/v1/balance', {
+      method: 'get',
+      headers: {
+        'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+      },
+      muteHttpExceptions: true
+    });
+    const result = JSON.parse(response.getContentText());
+    if (result.error) {
+      Logger.log('❌ Stripe connection failed: ' + result.error.message);
+    } else {
+      Logger.log('✅ Stripe connected! Available balance: $' + (result.available[0].amount / 100).toFixed(2));
+    }
+  } catch (error) {
+    Logger.log('❌ Error: ' + error.toString());
+  }
 }
