@@ -22,6 +22,27 @@
             --accent-glow: rgba(91, 191, 191, 0.1);
             --error: #e74c3c;
             --radius: 6px;
+            --nav-bg: rgba(20, 20, 40, 0.95);
+            --nav-text: #8b949e;
+            --toggle-bg: #e8e8e8;
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #0f0f1e;
+            --bg-secondary: #161628;
+            --bg-card: #1a1a2e;
+            --bg-input: #141428;
+            --border: #2a2a4a;
+            --border-focus: #5bbfbf;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent: #5bbfbf;
+            --accent-dark: #4a9e9e;
+            --accent-glow: rgba(91, 191, 191, 0.12);
+            --error: #f85149;
+            --nav-bg: rgba(10, 10, 22, 0.98);
+            --nav-text: #8b949e;
+            --toggle-bg: #2a2a4a;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -39,7 +60,7 @@
             align-items: center;
             justify-content: space-between;
             padding: 0.75rem 2rem;
-            background: rgba(20, 20, 40, 0.95);
+            background: var(--nav-bg);
             border-bottom: 1px solid var(--border);
             position: sticky;
             top: 0;
@@ -80,7 +101,7 @@
         }
 
         .nav-links a {
-            color: var(--text-secondary);
+            color: var(--nav-text);
             text-decoration: none;
             font-size: 0.85rem;
             font-weight: 400;
@@ -105,6 +126,58 @@
             background: var(--accent);
             color: var(--bg-primary);
         }
+
+        /* THEME TOGGLE */
+        .theme-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-left: 0.5rem;
+        }
+
+        .toggle-switch {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background: var(--toggle-bg);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.3s;
+            border: none;
+            padding: 0;
+        }
+
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 18px;
+            height: 18px;
+            background: #ffffff;
+            border-radius: 50%;
+            transition: transform 0.3s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+
+        [data-theme="dark"] .toggle-switch {
+            background: var(--accent);
+        }
+
+        [data-theme="dark"] .toggle-switch::after {
+            transform: translateX(20px);
+        }
+
+        .toggle-icon {
+            font-size: 1rem;
+            line-height: 1;
+            transition: opacity 0.2s;
+        }
+
+        .toggle-icon.sun { display: inline; }
+        .toggle-icon.moon { display: none; }
+        [data-theme="dark"] .toggle-icon.sun { display: none; }
+        [data-theme="dark"] .toggle-icon.moon { display: inline; }
 
         /* MAIN CONTENT */
         .container {
@@ -368,6 +441,23 @@
             text-decoration: none;
         }
 
+        /* Dark mode fixes for date input & select */
+        [data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+            filter: invert(1);
+        }
+
+        [data-theme="dark"] select option {
+            background: var(--bg-input);
+            color: var(--text-primary);
+        }
+
+        /* Smooth transitions between modes */
+        body, .form-card, .summary-card, .navbar, .footer,
+        .form-group input, .form-group select, .form-group textarea,
+        .radio-option, .submit-btn {
+            transition: background-color 0.3s, color 0.3s, border-color 0.3s;
+        }
+
         @media (max-width: 480px) {
             .radio-group { flex-direction: column; }
             .time-row { flex-direction: column; gap: 0; }
@@ -383,6 +473,13 @@
     </style>
 </head>
 <body>
+    <!-- THEME TOGGLE -->
+    <div class="theme-toggle" style="position:fixed;top:1rem;right:1rem;z-index:200;">
+        <span class="toggle-icon sun">☀️</span>
+        <button class="toggle-switch" id="themeToggle" aria-label="Toggle dark mode"></button>
+        <span class="toggle-icon moon">🌙</span>
+    </div>
+
     <!-- CONTENT -->
     <div class="container">
         <div class="header">
@@ -723,6 +820,44 @@
         });
 
         populateTimeDropdowns(wdStart, wdEnd);
+
+        // ============================================
+        // THEME TOGGLE
+        // ============================================
+        (function() {
+            const toggle = document.getElementById('themeToggle');
+            const html = document.documentElement;
+
+            // Check saved preference, then system preference
+            const saved = localStorage.getItem('fcfl-theme');
+            if (saved) {
+                html.setAttribute('data-theme', saved);
+            } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                html.setAttribute('data-theme', 'dark');
+            }
+
+            toggle.addEventListener('click', () => {
+                const current = html.getAttribute('data-theme');
+                const next = current === 'dark' ? 'light' : 'dark';
+                if (next === 'light') {
+                    html.removeAttribute('data-theme');
+                } else {
+                    html.setAttribute('data-theme', 'dark');
+                }
+                localStorage.setItem('fcfl-theme', next);
+            });
+
+            // Respect system changes
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+                if (!localStorage.getItem('fcfl-theme')) {
+                    if (e.matches) {
+                        html.setAttribute('data-theme', 'dark');
+                    } else {
+                        html.removeAttribute('data-theme');
+                    }
+                }
+            });
+        })();
     </script>
 </body>
 </html>
