@@ -325,8 +325,8 @@ function autoRefundDeposits() {
 function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
   const stripeKey = getStripeKey();
 
-  // Expire in 72 hours
-  const expiresAt = Math.floor(Date.now() / 1000) + (72 * 60 * 60);
+  // Expire in 24 hours (Stripe max for Checkout Sessions)
+  const expiresAt = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
 
   const payload = {
     'mode': 'payment',
@@ -340,8 +340,8 @@ function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
   lineItems.forEach((item, idx) => {
     payload[`line_items[${idx}][price_data][currency]`] = 'usd';
     payload[`line_items[${idx}][price_data][product_data][name]`] = item.name;
-    payload[`line_items[${idx}][price_data][unit_amount]`] = item.amount;
-    payload[`line_items[${idx}][quantity]`] = 1;
+    payload[`line_items[${idx}][price_data][unit_amount]`] = Math.round(item.amount).toString();
+    payload[`line_items[${idx}][quantity]`] = '1';
   });
 
   const response = UrlFetchApp.fetch('https://api.stripe.com/v1/checkout/sessions', {
