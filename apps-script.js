@@ -1,28 +1,33 @@
 // ============================================
-// FCFL Event Booking — Google Apps Script v2
+// FCFL Event Booking — Google Apps Script v3
 // ============================================
-// Paste this entire file into your Apps Script editor
-// (Extensions → Apps Script from your Google Sheet)
-//
 // SETUP:
-//   1. Paste this code
-//   2. Update CONFIG below with your Stripe key
-//   3. Run setupTriggers() once (from the function dropdown → Run)
+//   1. Paste this code into Apps Script editor
+//   2. Go to Project Settings (gear icon) → Script Properties
+//      → Add: STRIPE_SECRET_KEY = your Stripe secret key
+//   3. Run setupTriggers() once
 //   4. Deploy as web app (Deploy → New deployment → Web app → Anyone can access)
 
 // ============================================
-// CONFIG — Update these values
+// CONFIG
 // ============================================
 const CONFIG = {
-  STRIPE_SECRET_KEY: PropertiesService.getScriptProperties().getProperty('STRIPE_SECRET_KEY'),
   SHEET_NAME: 'Event Bookings',
   FCFL_EMAIL: 'info@fatcatfablab.org',
   DEPOSIT_AMOUNT_CENTS: 5000,  // $50.00
   HOURLY_RATE_CENTS: 2000,     // $20.00
   AUTO_REFUND_HOURS: 72,
-  SUCCESS_URL: 'https://fatcatfablab.org/booking-confirmed',
-  CANCEL_URL: 'https://fatcatfablab.org/booking-cancelled'
+  FORM_URL: 'https://harrison-f.github.io/fcfl-booking-preview'
 };
+
+// ============================================
+// STRIPE KEY — loaded from Script Properties
+// ============================================
+function getStripeKey() {
+  const key = PropertiesService.getScriptProperties().getProperty('STRIPE_SECRET_KEY');
+  if (!key) throw new Error('STRIPE_SECRET_KEY not set. Go to Project Settings → Script Properties to add it.');
+  return key;
+}
 
 // ============================================
 // COLUMN INDICES (1-based, matching sheet headers)
@@ -71,9 +76,9 @@ function doPost(e) {
       parseFloat(params.hostingFee).toFixed(2),
       '50.00',
       'Pending',
-      '',    // Payment Status
-      '',    // Checkout Session ID
-      '',    // Payment Intent ID
+      '',
+      '',
+      '',
       params.notes || ''
     ]);
 
@@ -129,7 +134,7 @@ function doPost(e) {
 
 // ============================================
 // APPROVAL HANDLER — Fires when Status changes to "Approved"
-// Must be an INSTALLABLE trigger (setupTriggers creates it)
+// Installable trigger (setupTriggers creates it)
 // ============================================
 function onStatusChange(e) {
   const sheet = e.source.getActiveSheet();
@@ -139,14 +144,12 @@ function onStatusChange(e) {
   const col = range.getColumn();
   const row = range.getRow();
 
-  // Only trigger on Status column changes
   if (col !== COL.STATUS) return;
-  if (row <= 1) return; // Skip header
+  if (row <= 1) return;
 
   const newValue = range.getValue();
   if (newValue !== 'Approved') return;
 
-  // Get row data
   const rowData = sheet.getRange(row, 1, 1, 18).getValues()[0];
   const email = rowData[COL.EMAIL - 1];
   const name = rowData[COL.NAME - 1];
@@ -163,13 +166,11 @@ function onStatusChange(e) {
     // Build Checkout Session line items
     const lineItems = [];
 
-    // Security deposit (always)
     lineItems.push({
       name: 'Security Deposit (refundable)',
       amount: CONFIG.DEPOSIT_AMOUNT_CENTS,
     });
 
-    // Hosting fee (paid events only)
     if (!isFree && hostingFee > 0) {
       lineItems.push({
         name: `Hosting Fee (${duration}hr × $20)`,
@@ -180,7 +181,6 @@ function onStatusChange(e) {
     // Create Stripe Checkout Session
     const session = stripeCreateCheckoutSession(lineItems, email, row);
 
-    // Save session ID
     sheet.getRange(row, COL.CHECKOUT_SESSION_ID).setValue(session.id);
     sheet.getRange(row, COL.PAYMENT_STATUS).setValue('Payment Link Sent');
 
@@ -233,8 +233,7 @@ function onStatusChange(e) {
 }
 
 // ============================================
-// PAYMENT STATUS CHECKER
-// Run periodically to update payment status from Stripe
+// PAYMENT STATUS CHECKER — runs every 2 hours
 // ============================================
 function checkPaymentStatus() {
   const sheet = getOrCreateSheet();
@@ -246,14 +245,12 @@ function checkPaymentStatus() {
     const sessionId = row[COL.CHECKOUT_SESSION_ID - 1];
     const rowNum = i + 1;
 
-    // Only check rows waiting for payment
     if (paymentStatus !== 'Payment Link Sent' || !sessionId) continue;
 
     try {
       const session = stripeGetCheckoutSession(sessionId);
 
       if (session.payment_status === 'paid') {
-        // Payment completed — save the PaymentIntent ID for refund later
         sheet.getRange(rowNum, COL.PAYMENT_INTENT_ID).setValue(session.payment_intent);
         sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Paid');
         Logger.log('Payment confirmed for row ' + rowNum);
@@ -268,8 +265,7 @@ function checkPaymentStatus() {
 }
 
 // ============================================
-// AUTO-REFUND DEPOSITS — Runs every 6 hours
-// Refunds $50 deposit 72 hours after the event date
+// AUTO-REFUND DEPOSITS — runs every 6 hours
 // ============================================
 function autoRefundDeposits() {
   const sheet = getOrCreateSheet();
@@ -284,10 +280,8 @@ function autoRefundDeposits() {
     const paymentIntentId = row[COL.PAYMENT_INTENT_ID - 1];
     const rowNum = i + 1;
 
-    // Only process paid, approved bookings
     if (status !== 'Approved' || paymentStatus !== 'Paid' || !paymentIntentId) continue;
 
-    // Parse event date and add 72 hours
     const eventDate = new Date(eventDateRaw);
     if (isNaN(eventDate.getTime())) continue;
 
@@ -295,13 +289,11 @@ function autoRefundDeposits() {
 
     if (now >= refundAfter) {
       try {
-        // Refund the deposit portion ($50)
         stripeCreateRefund(paymentIntentId, CONFIG.DEPOSIT_AMOUNT_CENTS);
 
         sheet.getRange(rowNum, COL.PAYMENT_STATUS).setValue('Deposit Refunded');
         sheet.getRange(rowNum, COL.STATUS).setValue('Completed');
 
-        // Notify the member
         const email = row[COL.EMAIL - 1];
         const name = row[COL.NAME - 1];
         const eventName = row[COL.EVENT_NAME - 1];
@@ -331,13 +323,18 @@ function autoRefundDeposits() {
 // ============================================
 
 function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
+  const stripeKey = getStripeKey();
+
+  // Expire in 72 hours
+  const expiresAt = Math.floor(Date.now() / 1000) + (72 * 60 * 60);
+
   const payload = {
     'mode': 'payment',
     'customer_email': customerEmail,
-    'success_url': CONFIG.SUCCESS_URL + '?session_id={CHECKOUT_SESSION_ID}',
-    'cancel_url': CONFIG.CANCEL_URL,
+    'success_url': CONFIG.FORM_URL + '?status=success',
+    'cancel_url': CONFIG.FORM_URL + '?status=cancelled',
     'metadata[sheet_row]': sheetRow.toString(),
-    'expires_after': 72 * 60 * 60, // 72 hours in seconds
+    'expires_at': expiresAt,
   };
 
   lineItems.forEach((item, idx) => {
@@ -350,7 +347,7 @@ function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
   const response = UrlFetchApp.fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'post',
     headers: {
-      'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+      'Authorization': 'Basic ' + Utilities.base64Encode(stripeKey + ':')
     },
     payload: payload,
     muteHttpExceptions: true
@@ -365,12 +362,14 @@ function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
 }
 
 function stripeGetCheckoutSession(sessionId) {
+  const stripeKey = getStripeKey();
+
   const response = UrlFetchApp.fetch(
     `https://api.stripe.com/v1/checkout/sessions/${sessionId}`,
     {
       method: 'get',
       headers: {
-        'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+        'Authorization': 'Basic ' + Utilities.base64Encode(stripeKey + ':')
       },
       muteHttpExceptions: true
     }
@@ -382,6 +381,8 @@ function stripeGetCheckoutSession(sessionId) {
 }
 
 function stripeCreateRefund(paymentIntentId, amountCents) {
+  const stripeKey = getStripeKey();
+
   const payload = {
     'payment_intent': paymentIntentId,
     'amount': amountCents,
@@ -390,7 +391,7 @@ function stripeCreateRefund(paymentIntentId, amountCents) {
   const response = UrlFetchApp.fetch('https://api.stripe.com/v1/refunds', {
     method: 'post',
     headers: {
-      'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+      'Authorization': 'Basic ' + Utilities.base64Encode(stripeKey + ':')
     },
     payload: payload,
     muteHttpExceptions: true
@@ -429,30 +430,29 @@ function getOrCreateSheet() {
 }
 
 // ============================================
-// SETUP — Run this ONCE to create all triggers
+// SETUP — Run ONCE to create all triggers
 // ============================================
 function setupTriggers() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // Remove all existing project triggers to avoid duplicates
+  // Clear existing triggers
   ScriptApp.getProjectTriggers().forEach(trigger => {
     ScriptApp.deleteTrigger(trigger);
   });
 
-  // 1. Installable onEdit trigger — fires on ANY edit with full permissions
-  //    (unlike the simple onEdit which can't send emails or call APIs)
+  // Installable onEdit — full permissions (can send emails + call APIs)
   ScriptApp.newTrigger('onStatusChange')
     .forSpreadsheet(ss)
     .onEdit()
     .create();
 
-  // 2. Auto-refund deposits — check every 6 hours
+  // Auto-refund deposits every 6 hours
   ScriptApp.newTrigger('autoRefundDeposits')
     .timeBased()
     .everyHours(6)
     .create();
 
-  // 3. Payment status checker — check every 2 hours
+  // Check payment status every 2 hours
   ScriptApp.newTrigger('checkPaymentStatus')
     .timeBased()
     .everyHours(2)
@@ -465,42 +465,25 @@ function setupTriggers() {
 }
 
 // ============================================
-// MANUAL HELPERS — Run from script editor as needed
+// MANUAL HELPERS
 // ============================================
 
-// Manually capture a deposit (if rules were broken)
+// Mark deposit as retained (rules were broken — skip auto-refund)
 function captureDeposit(rowNumber) {
   const sheet = getOrCreateSheet();
-  const piId = sheet.getRange(rowNumber, COL.PAYMENT_INTENT_ID).getValue();
-  if (!piId) {
-    Logger.log('No Payment Intent ID for row ' + rowNumber);
-    return;
-  }
-  // For charge+refund model, "capturing" means just NOT refunding
   sheet.getRange(rowNumber, COL.PAYMENT_STATUS).setValue('Deposit Retained');
   sheet.getRange(rowNumber, COL.STATUS).setValue('Completed');
   Logger.log('Deposit marked as retained for row ' + rowNumber);
 }
 
-// Set Stripe key — run this ONCE from the script editor
-// Before running: replace the placeholder below with your actual key
-function setStripeKey() {
-  const key = 'PASTE_YOUR_STRIPE_KEY_HERE';
-  if (key === 'PASTE_YOUR_STRIPE_KEY_HERE') {
-    Logger.log('❌ Edit this function first — replace the placeholder with your Stripe secret key');
-    return;
-  }
-  PropertiesService.getScriptProperties().setProperty('STRIPE_SECRET_KEY', key);
-  Logger.log('✅ Stripe key saved to Script Properties');
-}
-
 // Test Stripe connection
 function testStripeConnection() {
   try {
+    const stripeKey = getStripeKey();
     const response = UrlFetchApp.fetch('https://api.stripe.com/v1/balance', {
       method: 'get',
       headers: {
-        'Authorization': 'Basic ' + Utilities.base64Encode(CONFIG.STRIPE_SECRET_KEY + ':')
+        'Authorization': 'Basic ' + Utilities.base64Encode(stripeKey + ':')
       },
       muteHttpExceptions: true
     });

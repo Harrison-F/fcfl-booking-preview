@@ -594,6 +594,20 @@
                 <h2>Booking Request Submitted</h2>
                 <p>The FCFL board will review your request and you'll receive an email once approved. Approval typically takes a few business days.</p>
             </div>
+
+            <div class="success-message" id="paymentSuccessMsg">
+                <div class="checkmark">🎉</div>
+                <h2>Payment Confirmed!</h2>
+                <p>Your deposit and any fees have been processed. You're all set!<br>You'll receive a confirmation email shortly.</p>
+                <p style="margin-top:1rem;"><a href="https://harrison-f.github.io/fcfl-booking-preview/" style="color:var(--accent);">← Book another event</a></p>
+            </div>
+
+            <div class="success-message" id="paymentCancelledMsg">
+                <div class="checkmark">↩️</div>
+                <h2>Payment Cancelled</h2>
+                <p>No charges were made. If you'd like to complete your payment, use the link in your approval email.</p>
+                <p style="margin-top:1rem;"><a href="https://harrison-f.github.io/fcfl-booking-preview/" style="color:var(--accent);">← Back to booking form</a></p>
+            </div>
         </div>
     </div>
 
@@ -603,6 +617,21 @@
     </div>
 
     <script>
+        // ============================================
+        // HANDLE RETURN FROM STRIPE
+        // ============================================
+        (function() {
+            const params = new URLSearchParams(window.location.search);
+            const status = params.get('status');
+            if (status === 'success') {
+                document.getElementById('bookingForm').style.display = 'none';
+                document.getElementById('paymentSuccessMsg').style.display = 'block';
+            } else if (status === 'cancelled') {
+                document.getElementById('bookingForm').style.display = 'none';
+                document.getElementById('paymentCancelledMsg').style.display = 'block';
+            }
+        })();
+
         // ============================================
         // CONFIG
         // ============================================
