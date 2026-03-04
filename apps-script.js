@@ -37,19 +37,19 @@ const COL = {
   NAME: 2,
   EMAIL: 3,
   EVENT_NAME: 4,
-  DESCRIPTION: 5,
-  SPACE: 6,
-  DATE: 7,
-  START_TIME: 8,
-  END_TIME: 9,
-  DURATION: 10,
-  IS_FREE: 11,
-  HOSTING_FEE: 12,
-  DEPOSIT: 13,
-  STATUS: 14,
+  STATUS: 5,
+  DESCRIPTION: 6,
+  SPACE: 7,
+  DATE: 8,
+  START_TIME: 9,
+  END_TIME: 10,
+  DURATION: 11,
+  IS_FREE: 12,
+  HOSTING_FEE: 13,
+  DEPOSIT: 14,
   PAYMENT_STATUS: 15,
-  CHECKOUT_SESSION_ID: 16,
-  PAYMENT_INTENT_ID: 17,
+  CHECKOUT_SESSION_ID: 16,  // Header says "Deposit PI ID"
+  PAYMENT_INTENT_ID: 17,    // Header says "Fee PI ID"
   NOTES: 18
 };
 
@@ -62,24 +62,24 @@ function doPost(e) {
     const params = e.parameter;
 
     sheet.appendRow([
-      new Date(),
-      params.name,
-      params.email,
-      params.eventName,
-      params.description,
-      params.space,
-      params.date,
-      params.startTimeFormatted,
-      params.endTimeFormatted,
-      parseFloat(params.duration),
-      params.isFree === 'yes' ? 'Yes' : 'No',
-      parseFloat(params.hostingFee).toFixed(2),
-      '50.00',
-      'Pending',
-      '',
-      '',
-      '',
-      params.notes || ''
+      new Date(),                                    // Timestamp
+      params.name,                                   // Name
+      params.email,                                  // Email
+      params.eventName,                              // Event Name
+      'Pending',                                     // Status
+      params.description,                            // Description
+      params.space,                                  // Space
+      params.date,                                   // Date
+      params.startTimeFormatted,                     // Start Time
+      params.endTimeFormatted,                       // End Time
+      parseFloat(params.duration),                   // Duration (hrs)
+      params.isFree === 'yes' ? 'Yes' : 'No',       // Free Event?
+      parseFloat(params.hostingFee).toFixed(2),      // Hosting Fee
+      '50.00',                                       // Deposit
+      '',                                            // Payment Status
+      '',                                            // Checkout Session ID
+      '',                                            // Payment Intent ID
+      params.notes || ''                             // Notes
     ]);
 
     // Confirmation email to requester
@@ -412,10 +412,10 @@ function getOrCreateSheet() {
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.SHEET_NAME);
     sheet.appendRow([
-      'Timestamp', 'Name', 'Email', 'Event Name', 'Description',
-      'Space', 'Date', 'Start Time', 'End Time', 'Duration (hrs)',
-      'Free Event?', 'Hosting Fee', 'Deposit', 'Status',
-      'Payment Status', 'Checkout Session ID', 'Payment Intent ID', 'Notes'
+      'Timestamp', 'Name', 'Email', 'Event Name', 'Status',
+      'Description', 'Space', 'Date', 'Start Time', 'End Time',
+      'Duration (hrs)', 'Free Event?', 'Hosting Fee', 'Deposit',
+      'Payment Status', 'Deposit PI ID', 'Fee PI ID', 'Notes'
     ]);
     sheet.getRange(1, 1, 1, 18).setFontWeight('bold');
     sheet.setFrozenRows(1);
@@ -423,7 +423,7 @@ function getOrCreateSheet() {
     const statusRule = SpreadsheetApp.newDataValidation()
       .requireValueInList(['Pending', 'Approved', 'Completed', 'Denied', 'Cancelled'])
       .build();
-    sheet.getRange(2, COL.STATUS, 500).setDataValidation(statusRule);
+    sheet.getRange(2, 5, 500).setDataValidation(statusRule);
   }
 
   return sheet;
