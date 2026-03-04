@@ -334,7 +334,7 @@ function stripeCreateCheckoutSession(lineItems, customerEmail, sheetRow) {
     'success_url': CONFIG.FORM_URL + '?status=success',
     'cancel_url': CONFIG.FORM_URL + '?status=cancelled',
     'metadata[sheet_row]': sheetRow.toString(),
-    'expires_at': expiresAt,
+    'expires_at': expiresAt.toString(),
   };
 
   lineItems.forEach((item, idx) => {
@@ -385,7 +385,7 @@ function stripeCreateRefund(paymentIntentId, amountCents) {
 
   const payload = {
     'payment_intent': paymentIntentId,
-    'amount': amountCents,
+    'amount': amountCents.toString(),
   };
 
   const response = UrlFetchApp.fetch('https://api.stripe.com/v1/refunds', {
